@@ -22,6 +22,13 @@ LLM-generated code runs in one gVisor container per run: no network, read-only r
 0.5 vCPU / 512 MiB / 128 PIDs, output captured in bounded memory, hard timeouts, TTL self-destruct. The runtime
 fails closed if `runsc` is missing.
 
+### Jobs (see [docs/jobs.md](docs/jobs.md))
+
+BullMQ provides at-least-once delivery; a Postgres write-ahead ledger plus provider-side tokens provide exactly-once
+effect. Keys are `sha256(tenant, run, step, action, canonical params)` and never include the retry attempt.
+Ambiguous failures (timeouts, 5xx) are resolved by token or lookup, never blind retry. A reconciler adopts crashed-but-created
+resources and reaps orphans, with a blast-radius cap.
+
 ### Key trade-offs
 
 - **Template ledger over LLM summaries.** Lossier on nuance, but replayable and it never silently drops negative knowledge ("tried X, failed because Y").
@@ -37,11 +44,13 @@ fails closed if `runsc` is missing.
 | Postgres event store, Redis lease manager | Implemented, **not yet integration-tested** against real Postgres/Redis |
 | Sandbox: Docker Engine client, gVisor/hardened container policy, exec stream demux, tar upload, concurrency limits | Implemented, unit-tested against an in-process fake Docker daemon, **not yet run against real Docker/gVisor** |
 | MCP server (`src/mcp/server.ts`) | Implemented, not yet exercised end to end |
+| Idempotency keys, write-ahead ledger, runner, backoff, circuit breaker, DLQ triage, orphan reconciler | Implemented, unit-tested (including crash-recovery scenarios) |
+| BullMQ topology/workers (`src/jobs/queues.ts`), Postgres ledger (`src/jobs/pgLedger.ts`) | Implemented, **not yet run against real Redis/Postgres** |
 | tree-sitter AST slicing for the working-set tier | Not implemented |
 | Parallel candidate branches and join reducer | Not implemented (`branchId` is plumbed through) |
 | Real tokenizer | Not implemented (`chars / 4` estimate) |
 
-Planned next: Testcontainers zombie-writer test for fencing; real-Docker/gVisor integration test for the sandbox; task queue and idempotency layer.
+Planned next: Testcontainers zombie-writer test for fencing; real-Docker/gVisor integration test for the sandbox; Testcontainers tests for the BullMQ adapter and Postgres ledger; Section 4 (compliance proxy and vector cache).
 
 ## Develop
 
