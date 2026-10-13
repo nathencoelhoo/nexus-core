@@ -7,6 +7,7 @@ export const sha256 = (s: string): string =>
 /** Strip everything that varies between otherwise-identical failures. */
 export function normalizeMessage(m: string): string {
   return m
+    .replace(/\[REDACTED:([a-z_]+):[0-9a-f]+\]/g, '[REDACTED:$1]')       // scrubber tags vary per value
     .replace(/\x1b\[[0-9;]*m/g, '')                                   // ANSI
     .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?Z?/g, '<ts>')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')

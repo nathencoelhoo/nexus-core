@@ -55,10 +55,16 @@ export function renderLedger(entries: LedgerEntry[], budgetTokens: number): stri
 export interface Tiers { pinned: string; working: string; failure: string; ledger: string }
 const SPLIT = { pinned: 0.15, working: 0.45, failure: 0.25, ledger: 0.15 } as const;
 
-export function assemblePrompt(t: Tiers, totalTokens: number, blobRefs: Record<keyof Tiers, string>) {
+/**
+ * `scrub` runs on every tier BEFORE truncation (truncating first could leave half a secret). Pass it whenever the
+ * prompt leaves the trust boundary; promptSha is then computed over what the model actually saw.
+ */
+export function assemblePrompt(
+  t: Tiers, totalTokens: number, blobRefs: Record<keyof Tiers, string>, scrub: (s: string) => string = s => s,
+) {
   const part = (k: keyof Tiers) =>
     `## ${k.toUpperCase()}\n` +
-    (k === 'ledger' ? t.ledger : truncateHeadTail(t[k], Math.floor(totalTokens * SPLIT[k]), blobRefs[k]));
+    (k === 'ledger' ? scrub(t.ledger) : truncateHeadTail(scrub(t[k]), Math.floor(totalTokens * SPLIT[k]), blobRefs[k]));
   const prompt = (['pinned', 'working', 'failure', 'ledger'] as const).map(part).join('\n\n');
   return { prompt, promptSha: sha256(prompt), tokens: estimateTokens(prompt) };
 }

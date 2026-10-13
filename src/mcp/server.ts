@@ -10,6 +10,7 @@ import { DockerClient } from '../sandbox/client.ts';
 import { SandboxManager } from '../sandbox/manager.ts';
 import { DEFAULT_POLICY } from '../sandbox/policy.ts';
 import type { SandboxPolicy } from '../sandbox/policy.ts';
+import { StreamScrubber, randomSalt } from '../compliance/scrubber.ts';
 
 const tenantId = process.env.NEXUS_TENANT_ID;
 const runId = process.env.NEXUS_RUN_ID;
@@ -18,6 +19,8 @@ if (!tenantId || !runId) {
   process.exit(2);
 }
 const ident = { tenantId, runId };
+// Per-process salt: placeholder tags correlate repeated values within this run only.
+const salt = randomSalt();
 
 const policy: SandboxPolicy = {
   ...DEFAULT_POLICY,
@@ -59,7 +62,7 @@ server.tool(
   async ({ argv, timeout_ms, cwd }) => {
     try {
       const sb = await manager.getOrCreate(ident);
-      const r = await sb.exec({ argv, timeoutMs: timeout_ms, cwd });
+      const r = await sb.exec({ argv, timeoutMs: timeout_ms, cwd, scrub: () => new StreamScrubber({ salt }) });
       return text({
         exit_code: r.exitCode, termination: r.termination, duration_ms: r.durationMs,
         stdout: r.stdout.text, stderr: r.stderr.text,

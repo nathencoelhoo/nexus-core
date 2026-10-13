@@ -20,6 +20,11 @@ export interface ExecOptions {
   env?: Record<string, string>;
   /** Awaited per frame: a slow consumer stalls the socket read, which backpressures the daemon. */
   onFrame?: (f: Frame) => void | Promise<void>;
+  /**
+   * Factory for a streaming redactor (one per stream). Scrubbing happens BEFORE head+tail capture: truncating first
+   * could cut a secret in half and leave an unmatchable fragment in the output.
+   */
+  scrub?: () => { write(b: Buffer): string; flush(): string };
 }
 
 export interface ExecResult {
@@ -149,15 +154,19 @@ export class Sandbox {
     let flood = false;
     let hardTimeout = false;
 
+    const sOut = o.scrub?.();
+    const sErr = o.scrub?.();
     const timer = setTimeout(() => { hardTimeout = true; void this.kill(); }, timeoutMs + this.policy.killGraceMs);
     try {
       for await (const chunk of stream) {
         for (const f of demux.push(chunk as Buffer)) {
-          total += f.data.length;
-          if (f.stream === 'stdout') out.push(f.data);
-          else if (f.stream === 'stderr') err.push(f.data);
-          else daemonErrors.push(f.data.toString('utf8').slice(0, 1024));
-          if (o.onFrame) await o.onFrame(f);
+          total += f.data.length;                       // raw bytes: the flood guard must not depend on redaction
+          if (f.stream === 'daemon') { daemonErrors.push(f.data.toString('utf8').slice(0, 1024)); continue; }
+          const sc = f.stream === 'stdout' ? sOut : sErr;
+          const data = sc ? Buffer.from(sc.write(f.data), 'utf8') : f.data;
+          if (data.length === 0) continue;              // scrubber is holding a partial line
+          (f.stream === 'stdout' ? out : err).push(data);
+          if (o.onFrame) await o.onFrame({ stream: f.stream, data });
         }
         if (total > this.policy.floodBytes) { flood = true; break; }
       }
@@ -168,6 +177,16 @@ export class Sandbox {
     } finally {
       clearTimeout(timer);
       stream.destroy();
+    }
+
+    // Release whatever the scrubbers were holding (fails closed on unterminated key blocks).
+    for (const [sc, cap, stream] of [[sOut, out, 'stdout'], [sErr, err, 'stderr']] as const) {
+      const rest = sc?.flush();
+      if (rest) {
+        const data = Buffer.from(rest, 'utf8');
+        cap.push(data);
+        if (o.onFrame) await o.onFrame({ stream, data });
+      }
     }
 
     // Disconnecting does not stop the process, so a flooder must be killed, not just ignored.

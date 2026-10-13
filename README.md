@@ -1,64 +1,183 @@
 # nexus-core
 
-Control-plane core for an agentic **Code → Compile → Test → Patch** loop.
-The LLM proposes; a pure reducer decides. The model never picks the next state.
+[![CI](https://github.com/nathencoelhoo/nexus-core/actions/workflows/ci.yml/badge.svg)](https://github.com/nathencoelhoo/nexus-core/actions/workflows/ci.yml)
 
-![CI](../../actions/workflows/ci.yml/badge.svg)
+Control plane for an autonomous **Code → Compile → Test → Patch** agent loop, built around one rule: **the model proposes, deterministic code decides.**
+The LLM never picks the next state and never touches the host; secrets and PII the scrubber recognizes are redacted before the model sees them; and a retry cannot repeat an external side effect.
 
-## Design
+It is a TypeScript reference implementation of the four hard parts of running LLM-written code in production:
+a deterministic state machine, an isolated sandbox, exactly-once external actions, and a compliance boundary in front of the model.
+76 unit tests run in CI. See [Status](#status-what-is-and-is-not-verified) for what is not yet verified against real infrastructure.
 
-| Concern | Mechanism | File |
-|---|---|---|
-| Deterministic transitions | Pure `δ(state, artifact, usage, cfg)`; time enters only via `usage.nowMs` | `src/reducer.ts` |
-| Loop / explosion control | Transition, token, USD and wall-clock budgets; per-failure-fingerprint cap; `(state, treeRoot, fp)` cycle detection; lexicographic progress score with rollback | `src/reducer.ts` |
-| Failure identity | Diagnostic normalization (paths, lines, hex, timestamps, PIDs) then SHA-256 over the failure set | `src/fingerprint.ts` |
-| Context budgeting | Tiered prompt (pinned / working / failure / ledger), head+tail truncation with retrievable elision markers, template-built attempt ledger, `promptSha` for replay | `src/context.ts` |
-| Persistence | Postgres append-only event log (hash-partitioned, RLS per tenant) is the source of truth; Redis is lease + fence source + hot cache | `src/store.ts` |
-| Writer safety | Single writer per `(run, branch)`; **fencing enforced in Postgres** (PK on `seq` plus `fence` guard), so a zombie worker with an expired Redis lease cannot write | `src/store.ts`, `src/driver.ts` |
+## Architecture
 
-### Sandbox (see [docs/sandbox.md](docs/sandbox.md))
+```mermaid
+flowchart TB
+  subgraph CP["Control plane (trusted)"]
+    RED["Pure reducer<br/>delta(state, artifact, budget)"]
+    CTX["Context builder<br/>scrub, then truncate"]
+    SCR["Streaming scrubber<br/>secrets and PII"]
+    CACHE["Fix cache<br/>fingerprint + pgvector"]
+    MCP["MCP server<br/>one per tenant and run"]
+    MGR["Sandbox manager<br/>limits, TTL, reaper"]
+    WRK["BullMQ workers<br/>agent, infra, DLQ"]
+  end
+  subgraph ST["State"]
+    PG[("Postgres<br/>event log, action ledger, fix cache")]
+    RD[("Redis<br/>leases, fences, queues")]
+  end
+  subgraph SB["Untrusted"]
+    GV["gVisor container<br/>no network, read-only rootfs"]
+  end
+  LLM["LLM and embedding APIs"]
+  EXT["AWS, Vercel, GitHub"]
+  MCP --> MGR --> GV
+  GV -- "multiplexed stdout and stderr" --> SCR
+  SCR --> CTX --> LLM
+  LLM --> RED
+  RED -- "fenced append" --> PG
+  RED -- "lease and fence" --> RD
+  RED --> CACHE --> PG
+  WRK -- "write-ahead intent" --> PG
+  WRK -- "idempotency token" --> EXT
+```
 
-LLM-generated code runs in one gVisor container per run: no network, read-only rootfs, all capabilities dropped,
-0.5 vCPU / 512 MiB / 128 PIDs, output captured in bounded memory, hard timeouts, TTL self-destruct. The runtime
-fails closed if `runsc` is missing.
+**Design principles**
+- **Postgres is the arbiter.** Redis is a lease and cache layer only; wiping it loses nothing. Safety comes from primary keys, fencing and fenced updates in Postgres.
+- **Fail closed.** Missing `runsc` refuses to start. An unterminated private key is redacted. A desynced exec stream kills the sandbox. A full queue rejects instead of buffering.
+- **Every guard is enforced in code, not in a prompt.** Budgets, loop limits and isolation parameters live in reviewable, tested modules.
+- **Trade-offs are written down.** Each design doc lists what a choice costs and what is deliberately not covered.
 
-### Jobs (see [docs/jobs.md](docs/jobs.md))
+## The four modules
 
-BullMQ provides at-least-once delivery; a Postgres write-ahead ledger plus provider-side tokens provide exactly-once
-effect. Keys are `sha256(tenant, run, step, action, canonical params)` and never include the retry attempt.
-Ambiguous failures (timeouts, 5xx) are resolved by token or lookup, never blind retry. A reconciler adopts crashed-but-created
-resources and reaps orphans, with a blast-radius cap.
+### 1. Deterministic state machine and context engine
+`src/reducer.ts` `src/fingerprint.ts` `src/context.ts` `src/store.ts` `src/driver.ts`
 
-### Key trade-offs
+```mermaid
+flowchart LR
+  CODE -->|patch applied| COMPILE
+  COMPILE -->|exit 0| TEST
+  COMPILE -->|diagnostics| PATCH
+  TEST -->|failures| PATCH
+  PATCH -->|diff applied| COMPILE
+  TEST -->|all green| SUCCESS(["SUCCESS"])
+  CODE & COMPILE & TEST & PATCH -.-> G{"Reducer guards"}
+  G -->|"repeat, oscillation, stall"| ESCALATE(["ESCALATE"])
+  G -->|"transitions, tokens, USD, time"| BUDGET(["BUDGET_EXHAUSTED"])
+  G -->|"unsafe artifact"| UNSAFE(["FAILED_UNSAFE"])
+```
 
-- **Template ledger over LLM summaries.** Lossier on nuance, but replayable and it never silently drops negative knowledge ("tried X, failed because Y").
-- **Synchronous commit per transition.** About 1–3 ms against LLM latency in the hundreds of ms to seconds, so consistency wins.
-- **No multi-node Redlock.** Postgres is already the arbiter; Redis only reduces contention.
-- **Aggressive guards raise false escalations** on legitimately hard bugs. Tune `maxPatchPerFp` and `stallWindow` from replayed audit data.
+- The reducer is a pure function with no clock and no I/O, so any run replays deterministically from the event log.
+- **Loop control, in layers:** hard budgets (transitions, tokens, USD, wall clock); at most 2 patch attempts per failure fingerprint (normalized message, so paths and line numbers do not matter); cycle detection on `(state, tree root, fingerprint)`; a lexicographic progress score `(compile errors, failing tests)` with rollback to the best tree after 3 non-improving steps.
+- **Context:** a tiered prompt (pinned 15%, working set 45%, live failure 25%, ledger 15%). History is a template-built ledger, not an LLM summary, so negative knowledge ("tried X, failed because Y") is never silently dropped. Every prompt is hashed for replay.
+- **Persistence:** append-only, hash-partitioned `run_events` with row-level security; one writer per `(run, branch)`; the **fencing token is enforced in Postgres**, so a zombie worker with an expired Redis lease cannot write.
 
-## Status
+### 2. Sandbox and MCP server
+`src/sandbox/*` `src/mcp/server.ts` · [design doc](docs/sandbox.md)
 
-| Area | State |
+- **gVisor (`runsc`)** puts a user-space kernel between generated code and the host. `CapDrop: ALL`, `no-new-privileges`, non-root, read-only rootfs, tmpfs workspace, no network, 0.5 vCPU, 512 MiB with swap disabled, PID limit, no core dumps.
+- A **zero-dependency Docker Engine client** over the unix socket, including the HTTP connection hijack for `exec/start`.
+- **Stream demultiplexer** for Docker's framed stdout/stderr, correct at every chunk boundary, with `await`-per-frame backpressure to the daemon.
+- Two layers of timeout (`timeout -k` inside, a host timer that kills the container outside); output floods are cut and the container is killed; PID 1 is `sleep <ttl>` so orphans expire on their own.
+- Tenant and run identity come from the orchestrator's environment, **never from model-supplied tool arguments**.
+
+### 3. Exactly-once external actions
+`src/jobs/*` · [design doc](docs/jobs.md)
+
+BullMQ gives at-least-once delivery. A **write-ahead ledger in Postgres plus provider-side idempotency tokens** turn that into exactly-once *effect*.
+
+```mermaid
+sequenceDiagram
+  participant W as Worker
+  participant L as Ledger (Postgres)
+  participant P as Provider
+  W->>L: begin(key): atomic INTENT and lease
+  L-->>W: started, attempt 1
+  W->>P: create(token = key)
+  P-->>W: resource created
+  W-xL: succeed(key) fails, database down
+  Note over W: job fails, row stays INTENT or UNKNOWN
+  W->>L: begin(key) on retry
+  L-->>W: resumed, attempt 2
+  W->>P: lookup(token) or create(token = key)
+  P-->>W: same resource, deduplicated
+  W->>L: succeed(key, attempt 2)
+```
+
+- Key = `sha256(tenant, run, step, action, canonical params)`, **never including the retry attempt**. The same key is the ledger primary key and the provider token.
+- Errors are classified so that **ambiguous** outcomes (timeouts, resets, 5xx: the request may have executed) are resolved by token or lookup, never by blind retry.
+- Every ledger write after `begin()` is fenced by attempt number; leases use the database clock and are heartbeated, and an in-flight call is aborted if the lease is lost.
+- Full-jitter backoff honoring `Retry-After`, per-provider circuit breaker, bounded queue with admission control, DLQ triage (redrive, reconcile first, quarantine, or escalate), and an **orphan reconciler** with a blast-radius cap.
+
+### 4. Compliance boundary and fix cache
+`src/compliance/*` `src/cache/*` · [design doc](docs/compliance.md)
+
+- A **streaming scrubber** redacts keys, tokens, private keys, URL credentials, emails, phone numbers, cards (Luhn), SSNs and US-style addresses. Output **does not depend on how the input is chunked** (verified at every two-way split, including inside multi-byte characters, plus byte-at-a-time and random chunking), memory is bounded, and patterns use bounded quantifiers and are tested against 1 MB adversarial inputs.
+- It runs **before truncation** and before anything leaves the trust boundary. Placeholders carry a salted HMAC tag, so repeats correlate without enabling a dictionary attack.
+- The **fix cache** lets one agent reuse another's verified fix: exact fingerprint first, then pgvector similarity behind hard gates (tenant, tool, error code, language, toolchain). Confidence uses a Wilson lower bound, bad entries quarantine themselves, and a hit is only a *candidate* that still passes compile and test.
+- Embedding input must be a `Scrubbed` type: unscrubbed text does not compile.
+
+## Guarantees and the evidence behind them
+
+| Guarantee | Evidence |
 |---|---|
-| Reducer, fingerprinting, context utilities | Implemented, unit-tested (`npm test`) |
-| Postgres event store, Redis lease manager | Implemented, **not yet integration-tested** against real Postgres/Redis |
-| Sandbox: Docker Engine client, gVisor/hardened container policy, exec stream demux, tar upload, concurrency limits | Implemented, unit-tested against an in-process fake Docker daemon, **not yet run against real Docker/gVisor** |
-| MCP server (`src/mcp/server.ts`) | Implemented, not yet exercised end to end |
-| Idempotency keys, write-ahead ledger, runner, backoff, circuit breaker, DLQ triage, orphan reconciler | Implemented, unit-tested (including crash-recovery scenarios) |
-| BullMQ topology/workers (`src/jobs/queues.ts`), Postgres ledger (`src/jobs/pgLedger.ts`) | Implemented, **not yet run against real Redis/Postgres** |
-| tree-sitter AST slicing for the working-set tier | Not implemented |
-| Parallel candidate branches and join reducer | Not implemented (`branchId` is plumbed through) |
-| Real tokenizer | Not implemented (`chars / 4` estimate) |
+| State transitions are deterministic; loops, oscillation, stalls and budget overruns terminate | Unit tests in `test/reducer.test.ts` |
+| A crash after a provider call, or a lost ledger write, cannot create a second resource | Crash-matrix tests in `test/jobs.test.ts` (native token, lookup, DB fully down, ambiguous timeout) |
+| Concurrent duplicates execute once; a stale worker cannot overwrite the new owner | `test/jobs.test.ts` (in-memory ledger mirroring the SQL) |
+| Docker stream demux is correct at any chunk boundary; floods and hangs are contained | `test/sandbox.test.ts` against an in-process fake daemon |
+| Isolation parameters reach the Docker API | `test/sandbox.test.ts` asserts the create body (this does **not** prove runtime isolation) |
+| Secrets and PII covered by the detectors are redacted regardless of chunk boundaries | `test/compliance.test.ts` (every two-way split, byte-at-a-time, random chunking, 300 KB line) |
+| Tenants cannot read or influence each other's cached fixes | `test/cache.test.ts` (in-memory reference store) |
+| Zombie writer rejected by Postgres fencing | **Design only**: no integration test yet |
 
-Planned next: Testcontainers zombie-writer test for fencing; real-Docker/gVisor integration test for the sandbox; Testcontainers tests for the BullMQ adapter and Postgres ledger; Section 4 (compliance proxy and vector cache).
+## Status: what is and is not verified
 
-## Develop
+CI runs the typecheck and 76 unit tests. **Not yet run against real infrastructure:** Docker and gVisor, Postgres (event log, ledger, pgvector), Redis and BullMQ.
+The in-memory stores mirror the SQL semantics, so the logic is exercised, but a real-database test could still find differences.
+
+Other known limits: the embedder is a lexical baseline, not a semantic model; the scrubber does not detect names, non-US addresses or encoded secrets;
+no real cloud-provider adapters exist yet (tests use a fake cloud); detector and cache thresholds need tuning on real data.
+Each design doc ends with its own list of gaps.
+
+## Quick start
 
 ```bash
 npm install
 npm run typecheck
-npm test        # Node >= 22.6 (uses --experimental-strip-types)
+npm test                      # Node >= 22.6 (uses --experimental-strip-types)
 ```
+
+Run the sandbox MCP server (needs Docker with gVisor; see [docs/sandbox.md](docs/sandbox.md)):
+
+```bash
+docker build -t nexus-sandbox:latest -f docker/sandbox.Dockerfile .
+NEXUS_TENANT_ID=<tenant> NEXUS_RUN_ID=<run> npm run start:mcp
+# local development without gVisor: add NEXUS_ALLOW_RUNC_FALLBACK=1
+```
+
+## Repository layout
+
+```
+src/
+  reducer.ts fingerprint.ts context.ts types.ts   state machine, failure identity, prompt assembly
+  store.ts driver.ts                              Postgres event log, Redis leases, write path
+  sandbox/    policy client demux sandbox manager semaphore tar capture
+  mcp/        server.ts                           MCP tools: write_files, exec, reset
+  jobs/       idempotency ledger pgLedger runner errors backoff breaker dlq reconciler queues
+  compliance/ detectors scrubber
+  cache/      embedder store pgStore fixCache
+test/         one file per module, plus a fake Docker daemon in test/helpers
+docs/         sandbox.md  jobs.md  compliance.md
+docker/       sandbox.Dockerfile
+```
+
+## Roadmap
+
+1. Testcontainers integration tests: Postgres fencing (zombie writer), the ledger SQL against the in-memory reference, pgvector recall, BullMQ on real Redis.
+2. Run the sandbox against real gVisor and measure overhead.
+3. A real embedding model behind the `Embedder` interface, plus an ANN recall and latency benchmark.
+4. An NER pass for names and non-US addresses; cache staleness and invalidation policy.
+5. Provider adapters (AWS, Vercel, GitHub) and metrics and tracing.
 
 ## License
 
