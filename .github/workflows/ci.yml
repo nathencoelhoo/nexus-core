@@ -5,8 +5,10 @@ on:
   pull_request:
 
 jobs:
+  # Fast, no services: typecheck + unit tests.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,3 +18,87 @@ jobs:
       - run: npm install
       - run: npm run typecheck
       - run: npm test
+
+  # Real Postgres (with pgvector) and Redis: event-log fencing, RLS, ledger SQL, pgvector, leases, BullMQ end to end.
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NEXUS_ITEST: '1'
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run typecheck:integration
+      - run: npm run test:integration
+
+  # Real Docker daemon on the runner, default runc runtime.
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NEXUS_DOCKER_ITEST: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: docker pull node:22-bookworm-slim
+      - run: npm run test:docker
+
+  # Same suite under gVisor (runsc). Experimental: an installation or compatibility problem on the runner
+  # must not hide the results of the jobs above, so this one is allowed to fail.
+  gvisor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      NEXUS_DOCKER_ITEST: '1'
+      NEXUS_RUNTIME: runsc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install gVisor
+        run: |
+          set -e
+          ARCH=$(uname -m)
+          URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
+          wget -q ${URL}/runsc ${URL}/runsc.sha512 ${URL}/containerd-shim-runsc-v1 ${URL}/containerd-shim-runsc-v1.sha512
+          sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
+          chmod a+rx runsc containerd-shim-runsc-v1
+          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}'
+      - run: npm install
+      - run: docker pull node:22-bookworm-slim
+      - run: docker run --rm --runtime=runsc node:22-bookworm-slim node -e "console.log('hello from gVisor')"
+      - run: npm run test:docker
