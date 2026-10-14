@@ -1,3 +1,20 @@
-{ "compilerOptions": { "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext",
-  "strict": true, "noUncheckedIndexedAccess": true, "allowImportingTsExtensions": true,
-  "noEmit": true, "skipLibCheck": true }, "include": ["src", "test"] }
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "src",
+    "test"
+  ],
+  "exclude": [
+    "test/integration",
+    "node_modules"
+  ]
+}

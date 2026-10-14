@@ -5,7 +5,10 @@
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "start:mcp": "node --experimental-strip-types src/mcp/server.ts"
+    "start:mcp": "node --experimental-strip-types src/mcp/server.ts",
+    "test:integration": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=120000 test/integration/*.itest.ts",
+    "test:docker": "node --experimental-strip-types --test --test-timeout=180000 test/integration/docker.itest.ts",
+    "typecheck:integration": "tsc -p tsconfig.integration.json"
   },
   "dependencies": {
     "ioredis": "^5.4.1",

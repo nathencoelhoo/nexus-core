@@ -1,0 +1,14 @@
+# Local services for the integration tests:
+#   docker compose -f docker-compose.integration.yml up -d
+#   export NEXUS_ITEST=1 DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres REDIS_URL=redis://localhost:6379
+#   npm run test:integration
+# WARNING: the tests DROP tables and FLUSH Redis. Never point them at a database or Redis you care about.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]

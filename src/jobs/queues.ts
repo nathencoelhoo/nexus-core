@@ -28,6 +28,16 @@ export interface Topology {
   close(): Promise<void>;
 }
 
+/** Carries the error class through BullMQ so the DLQ can tell a poison job from an outage. */
+class PermanentJobError extends UnrecoverableError {
+  errorClass: 'permanent' | 'auth';
+  constructor(message: string, errorClass: 'permanent' | 'auth') {
+    super(message);
+    this.name = 'UnrecoverableError';       // BullMQ also matches on the name, which survives duplicate module copies
+    this.errorClass = errorClass;
+  }
+}
+
 export const RETRY_BACKOFF: BackoffOpts = { baseMs: 1_000, capMs: 5 * 60_000, maxRetryAfterMs: 5 * 60_000 };
 
 export const DEFAULT_JOB_OPTS: JobsOptions = {
@@ -62,9 +72,15 @@ export interface InfraWorkerOpts {
   /** Provider API quota: at most `max` jobs started per `duration` ms across this worker. */
   limiter?: { max: number; duration: number };
   maxRedrives?: number;
+  /** Backoff used when scheduling DLQ redrives (default: 30 s base, 1 h cap). */
+  dlqBackoff?: BackoffOpts;
+  /** Connection errors are emitted on the worker; an unhandled 'error' event would crash the process. */
+  onError?: (err: Error) => void;
 }
 
 function errorClassOf(err: Error): DeadLetter['errorClass'] {
+  const tagged = (err as { errorClass?: unknown }).errorClass;
+  if (tagged === 'permanent' || tagged === 'auth') return tagged;
   if (err instanceof PermanentFailure) return err.errorClass;
   if (err instanceof RetryableFailure) return err.errorClass;
   return classifyError(err).cls as ErrorClass;
@@ -86,7 +102,7 @@ export function startInfraWorker(
     async (job: Job<JobPayload>) => {
       const { tenantId, runId, stepId, action: name, params } = job.data;
       const action = registry.get(name);
-      if (!action) throw new UnrecoverableError(`unknown action "${name}"`);
+      if (!action) throw new PermanentJobError(`unknown action "${name}"`, 'permanent');
 
       const breaker = breakers.get(action.provider);
       if (!breaker.canPass()) {
@@ -100,7 +116,7 @@ export function startInfraWorker(
       } catch (e) {
         const cls = classifyError(e).cls;
         if (cls === 'transient' || cls === 'throttled' || cls === 'ambiguous') breaker.failure();
-        if (e instanceof PermanentFailure) throw new UnrecoverableError(e.message);
+        if (e instanceof PermanentFailure) throw new PermanentJobError(e.message, e.errorClass);
         throw e;
       }
     },
@@ -115,6 +131,8 @@ export function startInfraWorker(
     },
   );
 
+  worker.on('error', (err: Error) => (opts.onError ?? ((e: Error) => console.error('[nexus] worker error:', e.message)))(err));
+
   worker.on('failed', (job: Job<JobPayload> | undefined, err: Error) => {
     if (!job || !isFinal(job, err)) return;
     const p = job.data;
@@ -128,7 +146,7 @@ export function startInfraWorker(
     const decision = triage(dead, {
       breakerRetryInMs: prov => breakers.get(prov).retryInMs(),
       maxRedrives: opts.maxRedrives ?? 3,
-      backoff: { baseMs: 30_000, capMs: 3_600_000 },
+      backoff: opts.dlqBackoff ?? { baseMs: 30_000, capMs: 3_600_000 },
     });
     void topo.dlq.add('dead', { dead, payload: p, decision }, { jobId: `dead_${job.id}`, removeOnComplete: false, removeOnFail: false });
   });

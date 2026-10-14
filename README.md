@@ -7,7 +7,7 @@ The LLM never picks the next state and never touches the host; secrets and PII t
 
 It is a TypeScript reference implementation of the four hard parts of running LLM-written code in production:
 a deterministic state machine, an isolated sandbox, exactly-once external actions, and a compliance boundary in front of the model.
-76 unit tests run in CI. See [Status](#status-what-is-and-is-not-verified) for what is not yet verified against real infrastructure.
+76 unit tests and 47 integration tests (real Postgres with pgvector, Redis, Docker, and gVisor) run in CI as separate jobs. See [Status](#status-what-is-and-is-not-verified) for what is and is not verified.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ flowchart TB
 ```
 
 **Design principles**
-- **Postgres is the arbiter.** Redis is a lease and cache layer only; wiping it loses nothing. Safety comes from primary keys, fencing and fenced updates in Postgres.
+- **Postgres is the arbiter.** Redis holds leases, the fence counter and a hot cache. Safety comes from primary keys, fencing and fenced updates in Postgres; if Redis loses its counter, fences are re-seeded from Postgres on the next lease acquire.
 - **Fail closed.** Missing `runsc` refuses to start. An unterminated private key is redacted. A desynced exec stream kills the sandbox. A full queue rejects instead of buffering.
 - **Every guard is enforced in code, not in a prompt.** Budgets, loop limits and isolation parameters live in reviewable, tested modules.
 - **Trade-offs are written down.** Each design doc lists what a choice costs and what is deliberately not covered.
@@ -128,23 +128,33 @@ sequenceDiagram
 | Isolation parameters reach the Docker API | `test/sandbox.test.ts` asserts the create body (this does **not** prove runtime isolation) |
 | Secrets and PII covered by the detectors are redacted regardless of chunk boundaries | `test/compliance.test.ts` (every two-way split, byte-at-a-time, random chunking, 300 KB line) |
 | Tenants cannot read or influence each other's cached fixes | `test/cache.test.ts` (in-memory reference store) |
-| Zombie writer rejected by Postgres fencing | **Design only**: no integration test yet |
+| Zombie writer rejected by Postgres fencing; Redis counter loss cannot lock a run out | `test/integration/fencing.itest.ts` (CI job `integration`) |
+| Ledger SQL behaves exactly like the in-memory reference | Differential test over 1,250 random operations, `test/integration/ledger.itest.ts` |
+| Sandbox is unprivileged, read-only, networkless, limited, and cleaned up | `test/integration/docker.itest.ts` against a real daemon (CI jobs `docker`, `gvisor`) |
 
 ## Status: what is and is not verified
 
-CI runs the typecheck and 76 unit tests. **Not yet run against real infrastructure:** Docker and gVisor, Postgres (event log, ledger, pgvector), Redis and BullMQ.
-The in-memory stores mirror the SQL semantics, so the logic is exercised, but a real-database test could still find differences.
+CI runs four jobs (see [docs/testing.md](docs/testing.md)): typecheck and unit tests; integration tests against real Postgres with pgvector and
+Redis; the sandbox suite against a real Docker daemon; and the same suite under gVisor (experimental, allowed to fail).
+The integration and Docker suites were written without access to those services and are being brought up in CI, so check the workflow run
+rather than trusting this paragraph.
 
-Other known limits: the embedder is a lexical baseline, not a semantic model; the scrubber does not detect names, non-US addresses or encoded secrets;
-no real cloud-provider adapters exist yet (tests use a fake cloud); detector and cache thresholds need tuning on real data.
-Each design doc ends with its own list of gaps.
+Still not verified: behavior under network partitions, performance and ANN recall at scale, and any real cloud provider (tests use a fake cloud).
+Other known limits: the embedder is a lexical baseline, not a semantic model; the scrubber does not detect names, non-US addresses or encoded
+secrets; detector and cache thresholds need tuning on real data. Each design doc ends with its own list of gaps.
 
 ## Quick start
 
 ```bash
 npm install
 npm run typecheck
-npm test                      # Node >= 22.6 (uses --experimental-strip-types)
+npm test                      # unit tests; Node >= 22.6 (uses --experimental-strip-types)
+
+# integration tests need Postgres+pgvector and Redis (they drop tables and flush Redis, so use the compose file):
+docker compose -f docker-compose.integration.yml up -d
+export NEXUS_ITEST=1 DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres REDIS_URL=redis://localhost:6379
+npm run test:integration
+NEXUS_DOCKER_ITEST=1 npm run test:docker       # sandbox suite against your local Docker (add NEXUS_RUNTIME=runsc for gVisor)
 ```
 
 Run the sandbox MCP server (needs Docker with gVisor; see [docs/sandbox.md](docs/sandbox.md)):
@@ -167,14 +177,15 @@ src/
   compliance/ detectors scrubber
   cache/      embedder store pgStore fixCache
 test/         one file per module, plus a fake Docker daemon in test/helpers
-docs/         sandbox.md  jobs.md  compliance.md
+  integration/ tests against real Postgres, Redis, Docker (skipped unless enabled)
+docs/         sandbox.md  jobs.md  compliance.md  testing.md
 docker/       sandbox.Dockerfile
 ```
 
 ## Roadmap
 
-1. Testcontainers integration tests: Postgres fencing (zombie writer), the ledger SQL against the in-memory reference, pgvector recall, BullMQ on real Redis.
-2. Run the sandbox against real gVisor and measure overhead.
+1. Get every CI job green; measure gVisor overhead; add network-partition and chaos tests.
+2. Load and recall benchmarks for the ledger and the pgvector cache.
 3. A real embedding model behind the `Embedder` interface, plus an ANN recall and latency benchmark.
 4. An NER pass for names and non-US addresses; cache staleness and invalidation policy.
 5. Provider adapters (AWS, Vercel, GitHub) and metrics and tracing.
