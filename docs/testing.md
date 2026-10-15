@@ -31,6 +31,10 @@ Designing the tests, before any of them ran, exposed:
 4. The BullMQ worker had no `error` listener, so a Redis connection error would have crashed the process.
 5. `run_events` is hash-partitioned but the DDL created no partitions, so no insert could succeed.
 
+Found by actually running them:
+6. The Docker archive API cannot upload into this sandbox at all (`container rootfs is marked read-only`); it also cannot write into a tmpfs.
+   Uploads now stream into `tar -x` inside the container. My earlier docs described the archive approach as working; they were wrong.
+
 ## Known limits of the tests themselves
 
 - gVisor and cgroup-v1 hosts report different views of limits; those assertions are runc-only and tolerate missing files.

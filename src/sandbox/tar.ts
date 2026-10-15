@@ -1,9 +1,9 @@
 /**
- * Minimal deterministic USTAR writer for PUT /containers/{id}/archive.
+ * Minimal deterministic USTAR writer, streamed into `tar -x` inside the sandbox (see Sandbox.writeFiles).
  * - Paths are validated (no traversal, no absolute paths, no NULs).
  * - Parent directories are emitted explicitly with the sandbox uid/gid. Docker would
  *   otherwise create implied parents as root, leaving them unwritable for the sandbox user.
- * - mtime is pinned to 0, so identical inputs produce byte-identical archives.
+ * - mtime is pinned to 2000-01-01 (GNU tar warns about mtime 0), so identical inputs produce byte-identical archives.
  */
 export class PathError extends Error {}
 
@@ -37,7 +37,7 @@ function header(name: string, type: '0' | '5', size: number, mode: number, uid: 
   octal(h, 108, 8, uid);
   octal(h, 116, 8, gid);
   octal(h, 124, 12, size);
-  octal(h, 136, 12, 0);
+  octal(h, 136, 12, 946684800);
   h.fill(0x20, 148, 156);                 // checksum field counts as spaces while summing
   h.write(type, 156, 'ascii');
   h.write('ustar\0', 257, 'ascii');

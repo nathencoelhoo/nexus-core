@@ -120,11 +120,32 @@ export class Sandbox {
     return new Sandbox(client, policy, id, name);
   }
 
+  /**
+   * Files go in through `tar -x` running INSIDE the container, fed over exec stdin. The archive API (docker cp) cannot
+   * be used: it works on the container's rootfs from the host side, is refused outright when the rootfs is read-only
+   * ("container rootfs is marked read-only"), and could not see the tmpfs mounted over /workspace anyway.
+   * Image contract: GNU tar and `timeout`.
+   */
   async writeFiles(files: TarFile[]): Promise<{ files: number; bytes: number }> {
     this.assertAlive();
     const tar = buildTar(files);           // validates paths and sizes before touching the daemon
-    // Archive upload must target a RUNNING container: tmpfs mounts only exist after start.
-    await this.client.putArchive(this.id, '/workspace', tar);
+    const { Id } = await this.client.execCreate(this.id, {
+      AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: false,
+      User: this.policy.user, WorkingDir: '/workspace',
+      Cmd: ['timeout', '-k', '2', '30', 'tar', '-x', '-p', '-f', '-', '-C', '/workspace'],
+    });
+    const stream = await this.client.execStart(Id, tar);
+    const demux = new Demuxer();
+    const errs: Buffer[] = [];
+    try {
+      for await (const chunk of stream) {
+        for (const f of demux.push(chunk as Buffer)) if (f.stream !== 'stdout') errs.push(f.data);
+      }
+    } finally { stream.destroy(); }
+    const code = await this.waitExit(Id);
+    if (code !== 0) {
+      throw new Error(`workspace upload failed (exit ${code}): ${Buffer.concat(errs).toString('utf8').slice(0, 500)}`);
+    }
     return { files: files.length, bytes: tar.length };
   }
 

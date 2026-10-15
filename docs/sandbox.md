@@ -27,7 +27,7 @@ cross-tenant access, bounded resource use, deterministic cleanup.
 - **`/tmp` is `noexec`, `/workspace` is not.** Compiled test binaries must run from `/workspace`. Tools that exec from `/tmp` (some native build steps) will fail.
 - **tmpfs counts against the memory cgroup.** `/workspace` (256 MiB) plus `/tmp` (64 MiB) share the 512 MiB limit, so a full tmpfs can trigger an OOM kill. Exit code 137 without a timeout is reported as `signal_or_oom`.
 - **Exec cannot be killed through the API.** Disconnecting a client does not stop the process, so floods and hard timeouts kill the whole container.
-- **Docker tmpfs gotcha.** Archive upload to a tmpfs path only works on a running container, so the container starts with `sleep` and files are uploaded afterwards. Parent directories are emitted explicitly with the sandbox uid, because Docker would create implied parents as root.
+- **Uploading files.** The Docker archive API (`docker cp`) is unusable here: it operates on the container's rootfs from the host, is refused with `400 container rootfs is marked read-only` when the rootfs is read-only, and cannot see a tmpfs mounted over `/workspace`. (My first version used it and a real daemon rejected it.) Files are instead streamed to `tar -x` running inside the container over exec stdin, so they land in the real tmpfs, owned by the sandbox user. Cost: the image must contain GNU `tar`.
 - **Backpressure.** `onFrame` is awaited per frame, so a slow consumer stalls the socket read. The semaphore sheds load with `QueueFull` instead of queueing without bound.
 
 ## Host setup (gVisor)

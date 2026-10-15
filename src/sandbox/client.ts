@@ -71,11 +71,6 @@ export class DockerClient {
     await this.request('POST', `/containers/${id}/start`, { ok: [204, 304] });
   }
 
-  async putArchive(id: string, destDir: string, tar: Buffer): Promise<void> {
-    await this.request('PUT', `/containers/${id}/archive?path=${encodeURIComponent(destDir)}`,
-      { body: tar, headers: { 'Content-Type': 'application/x-tar' }, ok: [200] });
-  }
-
   async killContainer(id: string): Promise<void> {
     await this.request('POST', `/containers/${id}/kill?signal=SIGKILL`, { ok: [204, 404, 409] });
   }
@@ -100,8 +95,10 @@ export class DockerClient {
   /**
    * POST /exec/{id}/start hijacks the HTTP connection into a raw bidirectional stream
    * (101 Switching Protocols). Some daemons answer 200 and stream the body instead; handle both.
+   * If `stdin` is given (the exec must have AttachStdin) it is written and the write side is closed, which the
+   * daemon turns into EOF on the process's stdin. Reading continues until the daemon ends the stream.
    */
-  execStart(execId: string): Promise<Duplex> {
+  execStart(execId: string, stdin?: Buffer): Promise<Duplex> {
     return new Promise((resolve, reject) => {
       const payload = Buffer.from(JSON.stringify({ Detach: false, Tty: false }));
       const req = http.request({
@@ -113,10 +110,15 @@ export class DockerClient {
       });
       req.once('upgrade', (_res, socket, head) => {
         if (head.length > 0) socket.unshift(head);   // bytes that arrived with the 101 headers
+        if (stdin) socket.end(stdin);                // half-close: we keep reading the output
         resolve(socket);
       });
       req.once('response', res => {
-        if (res.statusCode === 200) { resolve(res as unknown as Duplex); return; }
+        if (res.statusCode === 200) {
+          if (stdin) { res.resume(); reject(new Error('daemon did not hijack the connection; cannot send stdin')); return; }
+          resolve(res as unknown as Duplex);
+          return;
+        }
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => reject(new DockerError(res.statusCode ?? 0, Buffer.concat(chunks).toString('utf8').slice(0, 500))));

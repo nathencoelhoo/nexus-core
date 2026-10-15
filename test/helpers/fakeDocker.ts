@@ -18,7 +18,7 @@ export interface Script { frames: Array<[1 | 2 | 3, string | Buffer]>; exitCode:
 export class FakeDocker {
   socketPath: string;
   created: any[] = [];
-  archives: Buffer[] = [];
+  uploads: Buffer[] = [];
   execBodies: any[] = [];
   kills = 0;
   removes = 0;
@@ -34,7 +34,7 @@ export class FakeDocker {
     this.dir = mkdtempSync(join(tmpdir(), 'fakedocker-'));
     this.socketPath = join(this.dir, 'd.sock');
     this.server = http.createServer((req, res) => this.handle(req, res));
-    this.server.on('upgrade', (_req, socket) => this.upgrade(socket as net.Socket));
+    this.server.on('upgrade', (req, socket, head) => this.upgrade(req, socket as net.Socket, head));
   }
 
   static async start(): Promise<FakeDocker> {
@@ -67,7 +67,6 @@ export class FakeDocker {
         return send(201, { Id: 'c1' });
       }
       if (m === 'POST' && path === '/containers/c1/start') return send(204);
-      if (m === 'PUT' && path.startsWith('/containers/c1/archive')) { this.archives.push(body); return send(200); }
       if (m === 'POST' && path === '/containers/c1/exec') { this.execBodies.push(JSON.parse(body.toString())); return send(201, { Id: 'e1' }); }
       if (m === 'GET' && path === '/exec/e1/json') return send(200, { Running: false, ExitCode: this.script.exitCode });
       if (m === 'POST' && path.startsWith('/containers/c1/kill')) {
@@ -81,8 +80,20 @@ export class FakeDocker {
     });
   }
 
-  private upgrade(socket: net.Socket): void {
+  private upgrade(req: http.IncomingMessage, socket: net.Socket, head: Buffer): void {
     this.sockets.add(socket);
+    // stdin: whatever follows the JSON request body (Content-Length bytes) is the client's stdin, until it half-closes.
+    const wantsStdin = this.execBodies[this.execBodies.length - 1]?.AttachStdin === true;
+    const bodyLen = Number(req.headers['content-length'] ?? 0);
+    let inbound = Buffer.from(head);
+    let clientDone = false;
+    let finish: (() => void) | null = null;
+    socket.on('data', (c: Buffer) => { inbound = Buffer.concat([inbound, c]); });
+    socket.on('end', () => {
+      clientDone = true;
+      if (wantsStdin) this.uploads.push(inbound.subarray(bodyLen));
+      finish?.();
+    });
     socket.on('close', () => this.sockets.delete(socket));
     socket.on('error', () => undefined);
     socket.write('HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n');
@@ -91,7 +102,10 @@ export class FakeDocker {
     let off = 0;
     const pump = () => {
       if (socket.destroyed) return;
-      if (off >= wire.length) { if (!this.script.hang) socket.end(); return; }
+      if (off >= wire.length) {
+        if (!this.script.hang) { if (wantsStdin && !clientDone) finish = () => socket.end(); else socket.end(); }
+        return;
+      }
       socket.write(wire.subarray(off, off + size));
       off += size;
       setTimeout(pump, 1);

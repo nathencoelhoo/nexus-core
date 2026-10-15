@@ -18,7 +18,7 @@ let client: DockerClient;
 before(async () => { fake = await FakeDocker.start(); client = new DockerClient(fake.socketPath, 5000); });
 after(async () => { await fake.stop(); });
 beforeEach(() => {
-  fake.created = []; fake.archives = []; fake.execBodies = []; fake.kills = 0; fake.removes = 0;
+  fake.created = []; fake.uploads = []; fake.execBodies = []; fake.kills = 0; fake.removes = 0;
   fake.runtimes = ['runc', 'runsc']; fake.script = { frames: [], exitCode: 0 };
 });
 
@@ -215,13 +215,23 @@ test('exec: input validation', async () => {
   await assert.rejects(sb.exec({ argv: ['ls'], env: { 'bad name': 'x' } }), InvalidRequest);
 });
 
-test('writeFiles: uploads a validated tar to /workspace of the running container', async () => {
+test('writeFiles: streams a validated tar into `tar -x` inside the container (the archive API cannot write to tmpfs)', async () => {
   const sb = await Sandbox.create(client, policy, ident);
   await sb.writeFiles([{ path: 'src/index.ts', content: 'export {}' }]);
-  assert.equal(fake.archives.length, 1);
-  assert.equal(parseTar(fake.archives[0]!)[1]!.name, 'src/index.ts');
-  await assert.rejects(sb.writeFiles([{ path: '../escape', content: 'x' }]), PathError);
-  assert.equal(fake.archives.length, 1);
+  assert.equal(fake.uploads.length, 1);
+  assert.equal(parseTar(fake.uploads[0]!)[1]!.name, 'src/index.ts');
+  const body = fake.execBodies[0];
+  assert.equal(body.AttachStdin, true);
+  assert.equal(body.User, '65534:65534');
+  assert.equal(body.WorkingDir, '/workspace');
+  assert.deepEqual(body.Cmd, ['timeout', '-k', '2', '30', 'tar', '-x', '-p', '-f', '-', '-C', '/workspace']);
+
+  fake.script = { frames: [[2, 'tar: no space left on device']], exitCode: 2 };      // a failing tar surfaces its stderr
+  await assert.rejects(sb.writeFiles([{ path: 'a.txt', content: 'x' }]), /exit 2.*no space left/);
+
+  const before = fake.execBodies.length;
+  await assert.rejects(sb.writeFiles([{ path: '../escape', content: 'x' }]), PathError);   // rejected before any daemon call
+  assert.equal(fake.execBodies.length, before);
 });
 
 // ---- manager -----------------------------------------------------------------------------
