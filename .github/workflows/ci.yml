@@ -86,16 +86,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install gVisor
+      - name: Install gVisor (official apt repository)
         run: |
-          set -e
-          ARCH=$(uname -m)
-          URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
-          wget -q ${URL}/runsc ${URL}/runsc.sha512 ${URL}/containerd-shim-runsc-v1 ${URL}/containerd-shim-runsc-v1.sha512
-          sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
-          chmod a+rx runsc containerd-shim-runsc-v1
-          sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin
-          sudo /usr/local/bin/runsc install
+          set -euxo pipefail
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+          sudo apt-get update
+          sudo apt-get install -y runsc
+          sudo runsc install
           sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}'
       - run: npm install
