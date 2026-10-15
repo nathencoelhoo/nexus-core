@@ -7,7 +7,7 @@ The LLM never picks the next state and never touches the host; secrets and PII t
 
 It is a TypeScript reference implementation of the four hard parts of running LLM-written code in production:
 a deterministic state machine, an isolated sandbox, exactly-once external actions, and a compliance boundary in front of the model.
-76 unit tests and 47 integration tests (real Postgres with pgvector, Redis, Docker, and gVisor) run in CI as separate jobs. See [Status](#status-what-is-and-is-not-verified) for what is and is not verified.
+76 unit tests and 49 integration tests (real Postgres with pgvector, Redis, Docker, and gVisor) run in CI as separate jobs. See [Status](#status-what-is-and-is-not-verified) for what is and is not verified.
 
 ## Architecture
 

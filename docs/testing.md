@@ -6,7 +6,7 @@ failure there never hides the results of the others.
 | Tier | Runs | Needs | Answers |
 |---|---|---|---|
 | Unit (`npm test`, 76 tests) | CI job `test` | nothing | Is the logic right? State machine, idempotency, scrubber, cache policy, against in-memory stand-ins |
-| Integration (`npm run test:integration`, 33 tests) | CI job `integration` | Postgres + pgvector, Redis | Do the real databases behave the way the stand-ins assumed? |
+| Integration (`npm run test:integration`, 35 tests) | CI job `integration` | Postgres + pgvector, Redis | Do the real databases behave the way the stand-ins assumed? |
 | Docker (`npm run test:docker`, 14 tests) | CI job `docker` | Docker daemon | Does the sandbox actually isolate, and does the Docker client work against the real API? |
 | gVisor (same Docker suite, `NEXUS_RUNTIME=runsc`) | CI job `gvisor` (allowed to fail) | Docker + runsc | Same, under the user-space kernel |
 
@@ -34,6 +34,10 @@ Designing the tests, before any of them ran, exposed:
 Found by actually running them:
 6. The Docker archive API cannot upload into this sandbox at all (`container rootfs is marked read-only`); it also cannot write into a tmpfs.
    Uploads now stream into `tar -x` inside the container. My earlier docs described the archive approach as working; they were wrong.
+
+7. The RLS policies cast `current_setting('app.tenant_id')` straight to uuid, so a connection with no tenant bound failed with
+   `invalid input syntax for type uuid: ""` instead of an RLS decision (found by the append-only test). Policies now use
+   `nullif(current_setting('app.tenant_id', true), '')::uuid`: an unbound tenant sees no rows and cannot write, and a test pins that.
 
 ## Known limits of the tests themselves
 

@@ -26,8 +26,8 @@ CREATE INDEX IF NOT EXISTS fix_cache_gate ON fix_cache (tenant_id, tool, code, l
 CREATE INDEX IF NOT EXISTS fix_cache_hnsw ON fix_cache USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 ALTER TABLE fix_cache ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_iso ON fix_cache
-  USING (tenant_id = current_setting('app.tenant_id')::uuid)
-  WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);
+  USING (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid);
 `;
 
 interface Row {

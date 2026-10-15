@@ -21,8 +21,8 @@ CREATE TABLE IF NOT EXISTS run_events (
 -- partitions: see partitionDdl()
 ALTER TABLE run_events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_iso ON run_events
-  USING (tenant_id = current_setting('app.tenant_id')::uuid)
-  WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);
+  USING (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid);
 -- REVOKE UPDATE, DELETE ON run_events FROM app_role;  (append-only)
 `;
 

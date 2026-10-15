@@ -108,6 +108,16 @@ itest('RLS: a tenant cannot see or write another tenant\'s rows, even with raw S
   assert.equal(after.quarantined, false);
 });
 
+itest('RLS fails closed when no tenant is bound', async () => {
+  await pgs.upsert(key(uuid()), 'unbound-1', await vec('unbound tenant message'), patch());
+  const c = await app.connect();
+  try {
+    await c.query('BEGIN');
+    assert.equal((await c.query('SELECT 1 FROM fix_cache')).rowCount, 0);
+    await c.query('ROLLBACK');
+  } finally { c.release(); }
+});
+
 itest('outcome tracking, quarantine and revival match the in-memory reference', async () => {
   const t = uuid();
   const mem = new MemoryFixCacheStore(3);

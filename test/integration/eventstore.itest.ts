@@ -104,9 +104,28 @@ itest('row-level security isolates tenants and rejects cross-tenant writes', asy
   } finally { c.release(); }
 });
 
-itest('the application role is append-only', async () => {
-  await assert.rejects(app.query(`UPDATE run_events SET to_state = 'X'`), (e: { code?: string }) => e.code === '42501');
-  await assert.rejects(app.query('DELETE FROM run_events'), (e: { code?: string }) => e.code === '42501');
+itest('the application role is append-only (denied by GRANTs, with a valid tenant bound)', async () => {
+  const c = await app.connect();
+  try {
+    for (const sql of [`UPDATE run_events SET to_state = 'X'`, 'DELETE FROM run_events']) {
+      await c.query('BEGIN');
+      await c.query(`SELECT set_config('app.tenant_id', $1, true)`, [uuid()]);   // valid tenant, so the denial cannot come from RLS
+      await assert.rejects(c.query(sql), (e: { code?: string }) => e.code === '42501', sql);
+      await c.query('ROLLBACK');
+    }
+  } finally { c.release(); }
+});
+
+itest('with no tenant bound, RLS fails closed: nothing is visible and nothing can be inserted', async () => {
+  const c = await app.connect();
+  try {
+    await c.query('BEGIN');
+    assert.equal((await c.query('SELECT 1 FROM run_events')).rowCount, 0);
+    await assert.rejects(
+      c.query(`INSERT INTO run_events (tenant_id, run_id, seq, fence, to_state, artifact) VALUES ($1, $2, 1, 1, 'X', '{}')`, [uuid(), uuid()]),
+      (e: { code?: string }) => e.code === '42501');
+    await c.query('ROLLBACK');
+  } finally { c.release(); }
 });
 
 itest('rows spread across hash partitions', async () => {
