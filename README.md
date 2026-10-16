@@ -134,14 +134,18 @@ sequenceDiagram
 
 ## Status: what is and is not verified
 
-CI runs four jobs (see [docs/testing.md](docs/testing.md)): typecheck and unit tests; integration tests against real Postgres with pgvector and
-Redis; the sandbox suite against a real Docker daemon; and the same suite under gVisor (experimental, allowed to fail).
-The integration and Docker suites were written without access to those services and are being brought up in CI, so check the workflow run
-rather than trusting this paragraph.
+All four CI jobs pass on the latest run:
+- typecheck and 76 unit tests;
+- 35 integration tests against real Postgres 16 with pgvector and Redis 7;
+- the 14-test sandbox suite against a real Docker daemon;
+- the same suite under gVisor (`runsc`). The sandbox manager fails closed if the requested runtime is not registered, so a green run means the containers really ran under gVisor.
 
-Still not verified: behavior under network partitions, performance and ANN recall at scale, and any real cloud provider (tests use a fake cloud).
-Other known limits: the embedder is a lexical baseline, not a semantic model; the scrubber does not detect names, non-US addresses or encoded
-secrets; detector and cache thresholds need tuning on real data. Each design doc ends with its own list of gaps.
+[docs/testing.md](docs/testing.md) explains what each tier checks, and [docs/what-the-tests-found.md](docs/what-the-tests-found.md) is a log of **twelve defects the tests exposed**, including a fencing module that had never executed, a Redis counter reset that could lock a run out forever, and a Docker upload API that cannot work with a read-only root filesystem.
+
+Caveats: capability, cgroup-limit and OOM assertions run on runc only (gVisor reports its own view of those); the cgroup and swap checks skip themselves if the files are absent; the gVisor job is configured as allowed-to-fail; timing-based tests could flake on a very slow runner.
+
+Not verified: behavior under network partitions, performance and ANN recall at scale, and any real cloud provider (tests use a fake cloud).
+Other known limits: the embedder is a lexical baseline, not a semantic model; the scrubber does not detect names, non-US addresses or encoded secrets; detector and cache thresholds need tuning on real data. Each design doc ends with its own list of gaps.
 
 ## Quick start
 
@@ -178,13 +182,13 @@ src/
   cache/      embedder store pgStore fixCache
 test/         one file per module, plus a fake Docker daemon in test/helpers
   integration/ tests against real Postgres, Redis, Docker (skipped unless enabled)
-docs/         sandbox.md  jobs.md  compliance.md  testing.md
+docs/         sandbox.md  jobs.md  compliance.md  testing.md  what-the-tests-found.md
 docker/       sandbox.Dockerfile
 ```
 
 ## Roadmap
 
-1. Get every CI job green; measure gVisor overhead; add network-partition and chaos tests.
+1. Measure gVisor overhead; add network-partition and chaos tests; make the gVisor job blocking once it has proven stable.
 2. Load and recall benchmarks for the ledger and the pgvector cache.
 3. A real embedding model behind the `Embedder` interface, plus an ANN recall and latency benchmark.
 4. An NER pass for names and non-US addresses; cache staleness and invalidation policy.

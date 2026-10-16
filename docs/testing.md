@@ -22,6 +22,8 @@ and flush Redis. For local runs use `docker-compose.integration.yml`.
 - **`queue`**: BullMQ + Postgres ledger + a fake provider end to end: exactly-once under duplicate enqueues, ambiguous failure recovery, permanent failures quarantined, exhausted jobs landing in the DLQ with the right decision, redrive, admission control.
 - **`docker`**: the hijacked exec stream, tar upload into a running container, unprivileged user, read-only rootfs, `noexec` tmp, no network, dropped capabilities and cgroup limits (runc), OOM kill, timeout, flood kill, bounded capture, end-to-end scrubbing, TTL self-destruct, orphan reaper, concurrency limits.
 
+For the full story, including how each was found and what pins the fix, see [what-the-tests-found.md](what-the-tests-found.md).
+
 ## Defects found while writing these tests
 
 Designing the tests, before any of them ran, exposed:
