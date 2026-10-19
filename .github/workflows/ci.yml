@@ -100,3 +100,47 @@ jobs:
       - run: docker pull node:22-bookworm-slim
       - run: docker run --rm --runtime=runsc node:22-bookworm-slim node -e "console.log('hello from gVisor')"
       - run: npm run test:docker
+
+  # The real AWS SDK against the moto EC2 emulator. Allowed to fail until the emulator's behavior has been confirmed stable.
+  aws-emulator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    services:
+      moto:
+        image: motoserver/moto:latest
+        ports:
+          - 5000:5000
+    env:
+      NEXUS_AWS_EMULATOR: '1'
+      AWS_ENDPOINT_URL: http://localhost:5000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Wait for moto
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:5000/moto-api/ >/dev/null && exit 0
+            sleep 2
+          done
+          echo "moto did not start"; exit 1
+      - run: npm run test:aws-emulator
+
+  # A real embedding model, run locally (downloads about 25 MB). Prints the benchmark against the lexical baseline.
+  embeddings:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      NEXUS_EMBED_ITEST: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm install --no-save @huggingface/transformers@^3
+      - run: npm run test:embeddings
