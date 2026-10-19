@@ -80,6 +80,14 @@ export class PgFixCacheStore implements FixCacheStore {
     } finally { c.release(); }
   }
 
+  /** The vector column's dimension is fixed in the DDL. Check it at startup instead of failing on the first insert. */
+  async verifyDimension(dim: number): Promise<void> {
+    const r = await this.pool.query<{ t: number }>(
+      `SELECT atttypmod AS t FROM pg_attribute WHERE attrelid = 'fix_cache'::regclass AND attname = 'embedding'`);
+    const got = r.rows[0]?.t;
+    if (got !== dim) throw new Error(`fix_cache.embedding is vector(${got ?? '?'}) but the embedder produces ${dim} dimensions`);
+  }
+
   getExact(key: CacheKey, fp: string): Promise<CacheEntry | null> {
     return this.tx(key.tenantId, async c => {
       const r = await c.query<Row>(

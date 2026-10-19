@@ -8,18 +8,30 @@
     "start:mcp": "node --experimental-strip-types src/mcp/server.ts",
     "test:integration": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=120000 test/integration/*.itest.ts",
     "test:docker": "node --experimental-strip-types --test --test-timeout=180000 test/integration/docker.itest.ts",
-    "typecheck:integration": "tsc -p tsconfig.integration.json"
+    "typecheck:integration": "tsc -p tsconfig.integration.json",
+    "test:embeddings": "node --experimental-strip-types --test --test-timeout=600000 test/integration/embeddings.itest.ts",
+    "test:aws-emulator": "node --experimental-strip-types --test --test-timeout=120000 test/integration/aws-moto.itest.ts",
+    "test:aws-live": "node --experimental-strip-types --test --test-timeout=600000 test/integration/aws-live.itest.ts"
   },
   "dependencies": {
     "ioredis": "^5.4.1",
     "pg": "^8.12.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.23.8",
-    "bullmq": "^5.40.0"
+    "bullmq": "^5.40.0",
+    "@aws-sdk/client-ec2": "^3.700.0"
   },
   "devDependencies": {
     "typescript": "^5.6.0",
     "@types/pg": "^8.11.0",
     "@types/node": "^22.0.0"
+  },
+  "peerDependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@huggingface/transformers": {
+      "optional": true
+    }
   }
 }

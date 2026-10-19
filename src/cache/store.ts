@@ -51,10 +51,12 @@ export interface CachePolicy {
   minWilson: number;              // lower confidence bound on success rate for entries with a record
   quarantineAfterFailures: number;
   maxCandidates: number;
+  /** A lookup slower than this is a miss: the cache must never cost more than the model call it tries to avoid. */
+  embedTimeoutMs: number;
 }
 
 export const DEFAULT_CACHE_POLICY: CachePolicy = {
-  minSimilarity: 0.92, minSimilarityUntested: 0.97, minWilson: 0.4, quarantineAfterFailures: 3, maxCandidates: 5,
+  minSimilarity: 0.92, minSimilarityUntested: 0.97, minWilson: 0.4, quarantineAfterFailures: 3, maxCandidates: 5, embedTimeoutMs: 3_000,
 };
 
 /** Wilson score lower bound (z=1.645, ~95% one-sided): 1 success of 1 is NOT trusted like 20 of 20. */

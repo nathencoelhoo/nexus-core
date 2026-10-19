@@ -172,3 +172,8 @@ itest('filtered ANN: always returns k rows for the tenant, with high recall, in 
   }
   assert.ok(hits / total >= 0.9, `recall ${(hits / total).toFixed(3)}`);
 });
+
+itest('verifyDimension catches an embedder / DDL mismatch at startup instead of on the first insert', async () => {
+  await pgs.verifyDimension(DIM);
+  await assert.rejects(pgs.verifyDimension(DIM * 2), /vector\(32\) but the embedder produces 64 dimensions/);
+});

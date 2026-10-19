@@ -1,14 +1,17 @@
 # Testing strategy
 
-Four tiers, each answering a different question. A tier that needs a real service runs as its own CI job so a
+Six tiers, each answering a different question. A tier that needs a real service runs as its own CI job so a
 failure there never hides the results of the others.
 
 | Tier | Runs | Needs | Answers |
 |---|---|---|---|
-| Unit (`npm test`, 76 tests) | CI job `test` | nothing | Is the logic right? State machine, idempotency, scrubber, cache policy, against in-memory stand-ins |
-| Integration (`npm run test:integration`, 35 tests) | CI job `integration` | Postgres + pgvector, Redis | Do the real databases behave the way the stand-ins assumed? |
+| Unit (`npm test`, 102 tests) | CI job `test` | nothing | Is the logic right? State machine, idempotency, scrubber, cache policy, against in-memory stand-ins |
+| Integration (`npm run test:integration`, 36 tests) | CI job `integration` | Postgres + pgvector, Redis | Do the real databases behave the way the stand-ins assumed? |
 | Docker (`npm run test:docker`, 14 tests) | CI job `docker` | Docker daemon | Does the sandbox actually isolate, and does the Docker client work against the real API? |
 | gVisor (same Docker suite, `NEXUS_RUNTIME=runsc`) | CI job `gvisor` (allowed to fail) | Docker + runsc | Same, under the user-space kernel |
+| AWS emulator (`npm run test:aws-emulator`, 5 tests) | CI job `aws-emulator` (allowed to fail) | `moto` container | The real AWS SDK wire contract of the EC2 adapter ([aws.md](aws.md)) |
+| Embeddings (`npm run test:embeddings`, 4 tests) | CI job `embeddings` (allowed to fail) | model download | A real embedding model on the fix-class benchmark ([embeddings.md](embeddings.md)) |
+| Live AWS (`npm run test:aws-live`, 4 tests) | **never in CI**; opt-in | an AWS account | EC2's real ClientToken behavior. Not yet run |
 
 Integration and Docker tests are skipped unless `NEXUS_ITEST=1` / `NEXUS_DOCKER_ITEST=1`, because several tests drop tables
 and flush Redis. For local runs use `docker-compose.integration.yml`.

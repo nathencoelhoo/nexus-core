@@ -7,7 +7,7 @@ The LLM never picks the next state and never touches the host; secrets and PII t
 
 It is a TypeScript reference implementation of the four hard parts of running LLM-written code in production:
 a deterministic state machine, an isolated sandbox, exactly-once external actions, and a compliance boundary in front of the model.
-76 unit tests and 49 integration tests (real Postgres with pgvector, Redis, Docker, and gVisor) run in CI as separate jobs. See [Status](#status-what-is-and-is-not-verified) for what is and is not verified.
+102 unit tests and 59 integration tests (real Postgres with pgvector, Redis, Docker, gVisor, an AWS emulator and a local embedding model) run in CI as separate jobs; 4 more opt-in tests target a live AWS account. See [Status](#status-what-is-and-is-not-verified) for what is and is not verified.
 
 ## Architecture
 
@@ -107,6 +107,7 @@ sequenceDiagram
 - Key = `sha256(tenant, run, step, action, canonical params)`, **never including the retry attempt**. The same key is the ledger primary key and the provider token.
 - Errors are classified so that **ambiguous** outcomes (timeouts, resets, 5xx: the request may have executed) are resolved by token or lookup, never by blind retry.
 - Every ledger write after `begin()` is fenced by attempt number; leases use the database clock and are heartbeated, and an in-flight call is aborted if the lease is lost.
+- An **AWS EC2 adapter** (`src/providers/aws`, [docs/aws.md](docs/aws.md)): the ledger key is the `ClientToken`, a tag carries it for crash recovery, a cost allowlist guards instance types, and AWS errors map onto the retry classes.
 - Full-jitter backoff honoring `Retry-After`, per-provider circuit breaker, bounded queue with admission control, DLQ triage (redrive, reconcile first, quarantine, or escalate), and an **orphan reconciler** with a blast-radius cap.
 
 ### 4. Compliance boundary and fix cache
@@ -115,7 +116,7 @@ sequenceDiagram
 - A **streaming scrubber** redacts keys, tokens, private keys, URL credentials, emails, phone numbers, cards (Luhn), SSNs and US-style addresses. Output **does not depend on how the input is chunked** (verified at every two-way split, including inside multi-byte characters, plus byte-at-a-time and random chunking), memory is bounded, and patterns use bounded quantifiers and are tested against 1 MB adversarial inputs.
 - It runs **before truncation** and before anything leaves the trust boundary. Placeholders carry a salted HMAC tag, so repeats correlate without enabling a dictionary attack.
 - The **fix cache** lets one agent reuse another's verified fix: exact fingerprint first, then pgvector similarity behind hard gates (tenant, tool, error code, language, toolchain). Confidence uses a Wilson lower bound, bad entries quarantine themselves, and a hit is only a *candidate* that still passes compile and test.
-- Embedding input must be a `Scrubbed` type: unscrubbed text does not compile.
+- Embedding input must be a `Scrubbed` type: unscrubbed text does not compile. Embedders behind one interface (lexical baseline, a local ONNX model, any OpenAI-compatible endpoint); the cache degrades to a miss if the embedder or database fails. [docs/embeddings.md](docs/embeddings.md) reports a retrieval benchmark and why the default thresholds need calibrating per embedder.
 
 ## Guarantees and the evidence behind them
 
@@ -134,18 +135,20 @@ sequenceDiagram
 
 ## Status: what is and is not verified
 
-All four CI jobs pass on the latest run:
-- typecheck and 76 unit tests;
-- 35 integration tests against real Postgres 16 with pgvector and Redis 7;
-- the 14-test sandbox suite against a real Docker daemon;
-- the same suite under gVisor (`runsc`). The sandbox manager fails closed if the requested runtime is not registered, so a green run means the containers really ran under gVisor.
+Verified on the last run (all green): typecheck and unit tests; 35 integration tests against real Postgres 16 with pgvector and Redis 7; the
+14-test sandbox suite against a real Docker daemon; and the same suite under gVisor (`runsc`). The sandbox manager fails closed if the requested
+runtime is not registered, so a green run means the containers really ran under gVisor.
+
+**Added since and not yet run in CI:** the AWS SDK against the `moto` emulator (`aws-emulator` job), a real local embedding model on the retrieval
+benchmark (`embeddings` job), and the new unit tests (102 in total). Both new jobs are allowed to fail until they have proven stable. The live-AWS
+tests are opt-in and have never been run. Check the workflow run rather than trusting this paragraph.
 
 [docs/testing.md](docs/testing.md) explains what each tier checks, and [docs/what-the-tests-found.md](docs/what-the-tests-found.md) is a log of **twelve defects the tests exposed**, including a fencing module that had never executed, a Redis counter reset that could lock a run out forever, and a Docker upload API that cannot work with a read-only root filesystem.
 
 Caveats: capability, cgroup-limit and OOM assertions run on runc only (gVisor reports its own view of those); the cgroup and swap checks skip themselves if the files are absent; the gVisor job is configured as allowed-to-fail; timing-based tests could flake on a very slow runner.
 
-Not verified: behavior under network partitions, performance and ANN recall at scale, and any real cloud provider (tests use a fake cloud).
-Other known limits: the embedder is a lexical baseline, not a semantic model; the scrubber does not detect names, non-US addresses or encoded secrets; detector and cache thresholds need tuning on real data. Each design doc ends with its own list of gaps.
+Not verified: behavior under network partitions, performance and ANN recall at scale, and EC2's real ClientToken behavior (the adapter is tested against a fake that encodes AWS's documentation and against the `moto` emulator; an opt-in live test exists and **has not been run**). The real embedding model has not yet been measured on the benchmark; the `embeddings` CI job prints the numbers.
+Other known limits: the default embedder is still the lexical baseline unless you configure another; the scrubber does not detect names, non-US addresses or encoded secrets; detector and cache thresholds need tuning on real data. Each design doc ends with its own list of gaps.
 
 ## Quick start
 
@@ -179,20 +182,21 @@ src/
   mcp/        server.ts                           MCP tools: write_files, exec, reset
   jobs/       idempotency ledger pgLedger runner errors backoff breaker dlq reconciler queues
   compliance/ detectors scrubber
-  cache/      embedder store pgStore fixCache
+  cache/      embedder store pgStore fixCache eval  (embedders/: transformers, openaiCompatible)
+  providers/aws/ ec2 sdk awsErrors
 test/         one file per module, plus a fake Docker daemon in test/helpers
   integration/ tests against real Postgres, Redis, Docker (skipped unless enabled)
-docs/         sandbox.md  jobs.md  compliance.md  testing.md  what-the-tests-found.md
+docs/         sandbox.md  jobs.md  compliance.md  testing.md  embeddings.md  aws.md  what-the-tests-found.md
 docker/       sandbox.Dockerfile
 ```
 
 ## Roadmap
 
-1. Measure gVisor overhead; add network-partition and chaos tests; make the gVisor job blocking once it has proven stable.
-2. Load and recall benchmarks for the ledger and the pgvector cache.
-3. A real embedding model behind the `Embedder` interface, plus an ANN recall and latency benchmark.
+1. Run the live AWS test once and record the result; measure the real embedding model on the benchmark and calibrate cache thresholds from it.
+2. Measure gVisor overhead; add network-partition and chaos tests; make the gVisor job blocking once it has proven stable.
+3. Load and recall benchmarks for the ledger and the pgvector cache; a larger, real-log retrieval benchmark.
 4. An NER pass for names and non-US addresses; cache staleness and invalidation policy.
-5. Provider adapters (AWS, Vercel, GitHub) and metrics and tracing.
+5. More provider adapters (Vercel, GitHub) on the same action interface, and metrics and tracing.
 
 ## License
 

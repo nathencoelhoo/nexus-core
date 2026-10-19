@@ -23,7 +23,7 @@ export interface FailureCtx {
 
 export type CacheDecision =
   | { kind: 'hit'; tier: 'exact' | 'semantic'; mode: 'apply_verbatim' | 'hint_llm'; entry: CacheEntry; similarity: number; confidence: number }
-  | { kind: 'miss'; reason: 'none' | 'below_threshold' | 'low_confidence' };
+  | { kind: 'miss'; reason: 'none' | 'below_threshold' | 'low_confidence' | 'embedder_error' | 'store_error' };
 
 export interface ResolveResult {
   source: 'cache' | 'llm';
@@ -62,11 +62,31 @@ export class FixCache {
   private embedder: Embedder;
   private policy: CachePolicy;
   private coalescer = new Coalescer();
+  private onError: ((e: Error, op: 'find' | 'learn' | 'report') => void) | undefined;
 
-  constructor(store: FixCacheStore, embedder: Embedder, policy: CachePolicy = DEFAULT_CACHE_POLICY) {
+  constructor(
+    store: FixCacheStore, embedder: Embedder, policy: CachePolicy = DEFAULT_CACHE_POLICY,
+    opts: { onError?: (e: Error, op: 'find' | 'learn' | 'report') => void } = {},
+  ) {
     this.store = store;
     this.embedder = embedder;
     this.policy = policy;
+    this.onError = opts.onError;
+  }
+
+  /** Bounded embedding call. If the timeout wins, the late result (or late rejection) is swallowed, never unhandled. */
+  private async embedOne(text: Scrubbed): Promise<Float32Array> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const call = this.embedder.embed([text]);
+    call.catch(() => undefined);
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`embedding timed out after ${this.policy.embedTimeoutMs}ms`)), this.policy.embedTimeoutMs);
+      });
+      const [v] = await Promise.race([call, timeout]);
+      if (!v) throw new Error('embedder returned no vector');
+      return v;
+    } finally { clearTimeout(timer); }
   }
 
   /**
@@ -91,7 +111,9 @@ export class FixCache {
   async find(ctx: FailureCtx): Promise<CacheDecision> {
     const key = keyOf(ctx, this.embedder.model);
 
-    const exact = await this.store.getExact(key, ctx.fp);          // O(1): no embedding call, no LLM
+    let exact: CacheEntry | null;
+    try { exact = await this.store.getExact(key, ctx.fp); }             // O(1): no embedding call, no LLM
+    catch (e) { this.onError?.(e as Error, 'find'); return { kind: 'miss', reason: 'store_error' }; }
     let sawCandidate = false;
     if (exact) {
       sawCandidate = true;
@@ -99,8 +121,13 @@ export class FixCache {
       if (a.ok) return this.hit('exact', exact, 1, a.confidence, ctx);
     }
 
-    const [vec] = await this.embedder.embed([buildKeyText(ctx)]);
-    const cands = await this.store.search(key, vec!, this.policy.maxCandidates);
+    let vec: Float32Array;
+    try { vec = await this.embedOne(buildKeyText(ctx)); }
+    catch (e) { this.onError?.(e as Error, 'find'); return { kind: 'miss', reason: 'embedder_error' }; }
+    let cands: Awaited<ReturnType<FixCacheStore['search']>>;
+    try { cands = await this.store.search(key, vec, this.policy.maxCandidates); }
+    catch (e) { this.onError?.(e as Error, 'find'); return { kind: 'miss', reason: 'store_error' }; }
+
     let best: { e: CacheEntry; sim: number; conf: number; rank: number } | null = null;
     for (const { entry, similarity } of cands) {
       sawCandidate = true;
@@ -131,16 +158,19 @@ export class FixCache {
     });
   }
 
-  /** Only a fix that resolved this fingerprint AND strictly improved the Section 1 score is ever stored. */
+  /** Only a fix that resolved this fingerprint AND strictly improved the Section 1 score is ever stored (`learn()`). Best effort. */
   async learn(a: { ctx: FailureCtx; patch: FixPatch; resolved: boolean; before: Score; after: Score }): Promise<CacheEntry | null> {
     if (!a.resolved || cmpScore(a.after, a.before) >= 0) return null;
     if (a.patch.diff.length > 64 * 1024) return null;                 // huge patches are not "fixes", they are rewrites
-    const [vec] = await this.embedder.embed([buildKeyText(a.ctx)]);
-    return this.store.upsert(keyOf(a.ctx, this.embedder.model), a.ctx.fp, vec!, a.patch);
+    try {
+      const vec = await this.embedOne(buildKeyText(a.ctx));
+      return await this.store.upsert(keyOf(a.ctx, this.embedder.model), a.ctx.fp, vec, a.patch);
+    } catch (e) { this.onError?.(e as Error, 'learn'); return null; }
   }
 
-  /** Report back after applying a cache-served patch. Failures quarantine bad entries automatically. */
-  report(tenantId: string, entryId: string, ok: boolean): Promise<void> {
-    return this.store.recordOutcome(tenantId, entryId, ok);
+  /** Report back after applying a cache-served patch. Failures quarantine bad entries automatically. Best effort. */
+  async report(tenantId: string, entryId: string, ok: boolean): Promise<void> {
+    try { await this.store.recordOutcome(tenantId, entryId, ok); }
+    catch (e) { this.onError?.(e as Error, 'report'); }
   }
 }
