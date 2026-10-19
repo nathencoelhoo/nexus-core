@@ -52,16 +52,39 @@ sweep** (precision and recall of "serve a cached fix when cosine >= t").
 **Finding:** the baseline ranks well (recall@1 0.875) but its similarity scale is compressed, so at the default threshold of 0.92 it serves only about
 10% of the fixable repeats. Ranking quality and threshold calibration are separate properties. Thresholds must be chosen per embedder from a sweep.
 
-### The real model
+### The real model: measured
 
-`npm run test:embeddings` (CI job `embeddings`) runs `TransformersEmbedder` on the same benchmark and prints the model and baseline side by side,
-with both threshold tables. **Those numbers have not been measured yet**; this document will be updated from the first CI run. The test asserts only
-sanity floors (recall@1 >= 0.6, positive margin) that detect a broken setup such as wrong pooling or dimension. It does not assert that the model beats
-the baseline, because that is a result to report, not a claim to presume.
+`TransformersEmbedder` (`Xenova/all-MiniLM-L6-v2`, 384 dimensions, local ONNX) on the same benchmark, from the `embeddings` CI job:
+
+| | recall@1 | MRR | same-fix mean | different-fix mean | margin |
+|---|---|---|---|---|---|
+| Lexical baseline (`HashingEmbedder(256)`) | 0.875 | 0.908 | 0.765 | 0.652 | 0.113 |
+| Local model | 0.875 | 0.928 | 0.583 | 0.462 | 0.121 |
+
+Precision / recall of "serve a cached fix when cosine >= t":
+
+| threshold | local model | lexical baseline |
+|---|---|---|
+| 0.60 | 0.57 / 0.42 | 0.39 / 1.00 |
+| 0.70 | 0.74 / 0.29 | 0.51 / 0.75 |
+| 0.75 | 0.78 / 0.15 | 0.60 / 0.38 |
+| 0.80 | 1.00 / 0.08 | 0.54 / 0.29 |
+| 0.85 | 1.00 / 0.08 | 1.00 / 0.19 |
+| 0.92 (the default `minSimilarity`) | 1.00 / 0.08 | 1.00 / 0.10 |
+
+Separately, on natural-language paraphrase the model is clearly strong: cosine 0.93 for a paraphrase of a TypeScript error versus 0.25 for an unrelated one.
+
+**What this does and does not show**
+- Ranking is a tie: identical recall@1, and an MRR difference of 0.02 is one or two items on a 32-item set. There are 48 same-fix pairs, so there are no confidence intervals worth quoting.
+- At the operating point that matters (precision >= 0.95) the baseline serves about twice as many correct repeats: threshold 0.85 gives 9 of 48 pairs, against 4 of 48 for the model at 0.80.
+- **Hypothesis, not tested:** the fix classes here differ by specific tokens (`undefined`, `null`, `missing`), which lexical features capture directly, while a general sentence model places all "type not assignable" diagnostics close together. A prose-like input (assertion messages, runtime exceptions, log lines) is where a semantic model should matter, and no benchmark here covers it.
+- The model's similarity scale is lower than the baseline's, so the default threshold of 0.92 serves almost nothing for either. Thresholds must be set per embedder from a sweep.
+
+**Decision:** for compiler diagnostics the lexical baseline stays the pragmatic default. It ties on ranking, is better at the high-precision operating point on this data, and costs no download, no ONNX runtime and no extra latency. `TransformersEmbedder` and the HTTP embedder remain available. Before preferring either, build a second benchmark from real run logs that includes prose-like failures; a hybrid of lexical and semantic scores is a reasonable experiment, with no result yet.
 
 ### Choosing a threshold
 
-Pick the highest-recall threshold whose precision is at least 0.95 (`bestThreshold`). Precision matters more than recall: a wrong cached patch costs a
+Pick the highest-recall threshold whose precision is at least 0.95 (`bestThreshold`). On this benchmark that is 0.85 for the baseline and 0.80 for the local model, both from only 48 same-fix pairs: treat them as starting points and recalibrate on real logs. Precision matters more than recall: a wrong cached patch costs a
 compile-and-test cycle and counts against the loop budget, while a missed hit only costs one LLM call.
 
 ## Operating notes
@@ -73,5 +96,5 @@ compile-and-test cycle and counts against the loop budget, while a missed hit on
 ## Known limits
 
 - The benchmark is small (32 texts), synthetic in construction (real messages, hand-labelled fix classes) and covers one tool. Treat results as a smoke test and a calibration aid, not a proof.
-- No code-specialized embedding model was evaluated; the default is a general English sentence model.
+- No code-specialized embedding model was evaluated; the local model is a general English sentence model.
 - Fix classes were labelled by hand. Real validation needs logs from real runs and the real outcome of cached patches (the cache already records successes and failures per entry).

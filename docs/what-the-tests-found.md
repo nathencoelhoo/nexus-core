@@ -72,6 +72,16 @@ binds a valid tenant first so the denial can only come from the grants.
 Property-style tests (invariance over every split, every chunk size, random chunking; differential comparison of two
 implementations) found A and the rest of the scrubber's edge cases that example-based tests would have missed.
 
+## Measurements that were not bugs but changed what the docs say
+
+- **A compressed similarity scale.** The lexical embedder ranks well (recall@1 0.875) but its same-fix pairs average only 0.77 similarity, so the default
+  threshold of 0.92 serves about 10% of fixable repeats. Ranking quality and threshold calibration are separate; thresholds are now per embedder.
+- **A real embedding model did not beat the lexical baseline.** On a 32-item fix-class benchmark the local MiniLM model tied on recall@1 (0.875) and
+  served fewer correct repeats at equal precision (4 versus 9 of 48 pairs at precision >= 0.95), while being clearly better at natural-language paraphrase.
+  The benchmark is small and the explanation is a hypothesis, so the conclusion recorded is "no evidence the model is better here", and the default stays lexical.
+- **The AWS emulator does not enforce ClientToken idempotency** (the CI log says so). That tier proves the wire contract and the tag-lookup recovery path;
+  the deduplication guarantee itself is checked only by the opt-in live test, which has not been run.
+
 ## What did *not* go wrong, and why that is informative
 
 The Postgres ledger SQL matched the in-memory reference over 1,250 random operations on the first run, and the zombie-writer

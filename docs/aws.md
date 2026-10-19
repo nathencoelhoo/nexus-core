@@ -42,7 +42,7 @@ Three EC2 behaviors drive the design (from AWS's documentation; the unit tests e
 | Tier | What it proves | What it cannot prove |
 |---|---|---|
 | Unit (`test/aws-ec2.test.ts`, 12 tests) | The adapter, runner, ledger and reconciler behave correctly against a fake that encodes the documented token semantics | That the fake matches real EC2 |
-| Emulator (`npm run test:aws-emulator`, CI job `aws-emulator`, 5 tests) | The real AWS SDK wire contract: tags, ClientToken, filters, terminate, pagination, real error shapes | ClientToken enforcement: `moto` may not implement it (the test only reports whether it does) |
+| Emulator (`npm run test:aws-emulator`, CI job `aws-emulator`, 5 tests, passing) | The real AWS SDK wire contract: tags, ClientToken, filters, terminate, pagination, the real `InvalidInstanceID.NotFound` error shape, and the crash-recovery path through tag lookup | ClientToken enforcement: CI shows `moto` does **not** dedupe a repeated token (observed), so this tier cannot test the guarantee |
 | Live (`npm run test:aws-live`, **opt-in, never in CI**, 4 tests) | EC2 returns the same instance for a repeated token; a mismatch is rejected; the terminated-token behavior; the tag-lookup consistency lag | Nothing else; it has **not been run yet** |
 
 ### Running the live test
