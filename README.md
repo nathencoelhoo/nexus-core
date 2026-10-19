@@ -7,7 +7,7 @@ The LLM never picks the next state and never touches the host; secrets and PII t
 
 It is a TypeScript reference implementation of the four hard parts of running LLM-written code in production:
 a deterministic state machine, an isolated sandbox, exactly-once external actions, and a compliance boundary in front of the model.
-102 unit tests and 59 integration tests (real Postgres with pgvector, Redis, Docker, gVisor, an AWS emulator and a local embedding model) run in CI as separate jobs; 4 more opt-in tests target a live AWS account. See [Status](#status-what-is-and-is-not-verified) for what is and is not verified.
+102 unit tests and 59 integration tests (real Postgres with pgvector, Redis, Docker, gVisor, an AWS emulator and a local embedding model) run in CI as separate jobs. Four more opt-in tests target a live AWS account and have not been run. See [Status](#status-what-is-and-is-not-verified) for what is and is not verified.
 
 ## Architecture
 
@@ -135,20 +135,24 @@ sequenceDiagram
 
 ## Status: what is and is not verified
 
-Verified on the last run (all green): typecheck and unit tests; 35 integration tests against real Postgres 16 with pgvector and Redis 7; the
-14-test sandbox suite against a real Docker daemon; and the same suite under gVisor (`runsc`). The sandbox manager fails closed if the requested
-runtime is not registered, so a green run means the containers really ran under gVisor.
+All six CI jobs pass on the latest run:
+- typecheck and 102 unit tests;
+- 36 integration tests against real Postgres 16 with pgvector and Redis 7;
+- the 14-test sandbox suite against a real Docker daemon, and again under gVisor (`runsc`). The sandbox manager fails closed if the requested runtime is not registered, so a green run means the containers really ran under gVisor;
+- 5 tests of the AWS EC2 adapter, using the real AWS SDK against the `moto` emulator;
+- a real local embedding model on a retrieval benchmark (4 tests).
 
-**Added since and not yet run in CI:** the AWS SDK against the `moto` emulator (`aws-emulator` job), a real local embedding model on the retrieval
-benchmark (`embeddings` job), and the new unit tests (102 in total). Both new jobs are allowed to fail until they have proven stable. The live-AWS
-tests are opt-in and have never been run. Check the workflow run rather than trusting this paragraph.
-
+The newest jobs (`gvisor`, `aws-emulator`, `embeddings`) are still configured as allowed-to-fail until they have proven stable.
 [docs/testing.md](docs/testing.md) explains what each tier checks, and [docs/what-the-tests-found.md](docs/what-the-tests-found.md) is a log of **twelve defects the tests exposed**, including a fencing module that had never executed, a Redis counter reset that could lock a run out forever, and a Docker upload API that cannot work with a read-only root filesystem.
 
-Caveats: capability, cgroup-limit and OOM assertions run on runc only (gVisor reports its own view of those); the cgroup and swap checks skip themselves if the files are absent; the gVisor job is configured as allowed-to-fail; timing-based tests could flake on a very slow runner.
+**Measured, and worth knowing**
+- The `moto` emulator does **not** enforce EC2's ClientToken idempotency (the CI log says so). EC2's real behavior is checked only by an opt-in live test (`npm run test:aws-live`) that **has not been run**; until then the deduplication claim rests on AWS's documentation.
+- On the 32-item fix-class benchmark the real embedding model ties the lexical baseline on recall@1 (0.875) and serves fewer correct repeats at equal precision (4 versus 9 of 48 pairs at precision >= 0.95), while being clearly better at natural-language paraphrase (cosine 0.93 versus 0.25 for an unrelated error). The set is small, so this is "no evidence the model is better here", not a verdict. The default stays lexical; see [docs/embeddings.md](docs/embeddings.md).
 
-Not verified: behavior under network partitions, performance and ANN recall at scale, and EC2's real ClientToken behavior (the adapter is tested against a fake that encodes AWS's documentation and against the `moto` emulator; an opt-in live test exists and **has not been run**). The real embedding model has not yet been measured on the benchmark; the `embeddings` CI job prints the numbers.
-Other known limits: the default embedder is still the lexical baseline unless you configure another; the scrubber does not detect names, non-US addresses or encoded secrets; detector and cache thresholds need tuning on real data. Each design doc ends with its own list of gaps.
+Caveats: capability, cgroup-limit and OOM assertions run on runc only (gVisor reports its own view of those); the cgroup and swap checks skip themselves if the files are absent; timing-based tests could flake on a very slow runner.
+
+Not verified: behavior under network partitions, performance and ANN recall at scale, and any real cloud account.
+Other known limits: the scrubber does not detect names, non-US addresses or encoded secrets; detector and cache thresholds need tuning on real data. Each design doc ends with its own list of gaps.
 
 ## Quick start
 
@@ -192,7 +196,7 @@ docker/       sandbox.Dockerfile
 
 ## Roadmap
 
-1. Run the live AWS test once and record the result; measure the real embedding model on the benchmark and calibrate cache thresholds from it.
+1. Run the live AWS test once and record the result; build a retrieval benchmark from real run logs (including prose-like failures) and try a hybrid lexical and semantic score.
 2. Measure gVisor overhead; add network-partition and chaos tests; make the gVisor job blocking once it has proven stable.
 3. Load and recall benchmarks for the ledger and the pgvector cache; a larger, real-log retrieval benchmark.
 4. An NER pass for names and non-US addresses; cache staleness and invalidation policy.
